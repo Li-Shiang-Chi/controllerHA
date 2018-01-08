@@ -30,7 +30,7 @@ install_dialog() {
 }
 
 check_install() {
-    dialog --title "automatically controller HA based on III environment installer" --yesno "Do you want to install controllerHA ?" 8 50
+    dialog --title "automatically controller HA based on III environment installer" --yesno "Do you want to install controllerHA ?" 8 80 
     result=$?
     if [ $result -eq 1 ] ; then
 	clear;
@@ -114,15 +114,21 @@ make_config_file() {
 upstart_setting() {
     UPSTART_CONF_FILE=/home/localadmin/controllerHA/controllerHAd.conf
     cp $UPSTART_CONF_FILE /etc/init/.
-    start_controller_service
+    dashboard_setting
+}
+dashboard_setting() {
+   cp /home/localadmin/controllerHA/example/keystone.py /usr/share/openstack-dashboard/openstack_dashboard/api/.
+   start_controller_service
 }
 start_controller_service() {
+    service apache2 restart >> $LOG_FILE
     service controllerHAd restart >> $LOG_FILE
     service controllerHAd status >> $LOG_FILE
     install_script_end
 }
 
 install_script_end() {
+    dialog --title "install success" --msgbox  "install success!" 8 80
     DATE=`date`
     echo "==========$DATE controllerHA_install script end=============" >> $LOG_FILE   
 }
