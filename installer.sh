@@ -10,6 +10,11 @@ if [ ! -e "$LOG_FILE" ] ; then
     touch $LOG_FILE
 fi
 
+ARGC=$#
+remote_controller_ip=$1
+blockstorage_ip=$2
+default_controller=$3
+
 install_script_start() {
     DATE=`date`
     echo "==========$DATE controllerHA_install script start=============" >> $LOG_FILE
@@ -26,7 +31,13 @@ install_dialog() {
 	echo "======dialog install failed======" >> $LOG_FILE
 	set -e
     fi
-    check_install
+
+    if [[ ! $ARGC -eq 0 ]] ;
+    then
+	make_config_file
+    else
+	check_install
+    fi
 }
 
 check_install() {
@@ -113,7 +124,13 @@ make_config_file() {
 
 upstart_setting() {
     UPSTART_CONF_FILE=/home/localadmin/controllerHA/controllerHAd.conf
+    RC_LOCAL_FILE=/etc/rc.local
     cp $UPSTART_CONF_FILE /etc/init/.
+
+    if ! grep -q controllerHAd "$RC_LOCAL_FILE"
+    then
+	sed -i "19i service controllerHAd restart" $RC_LOCAL_FILE
+    fi
     dashboard_setting
 }
 dashboard_setting() {
@@ -128,7 +145,10 @@ start_controller_service() {
 }
 
 install_script_end() {
-    dialog --title "install success" --msgbox  "install success!" 8 80
+    if [[ $ARGC -eq 0 ]] ;
+    then
+	dialog --title "install success" --msgbox  "install success!" 8 80
+    fi
     DATE=`date`
     echo "==========$DATE controllerHA_install script end=============" >> $LOG_FILE   
 }

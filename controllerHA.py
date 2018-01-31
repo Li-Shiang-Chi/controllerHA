@@ -10,9 +10,6 @@
 #	automatically change primary/backup when controller fails.
 ##########################################################
 
-from keystoneauth1.identity import v3
-from keystoneauth1 import session
-from novaclient import client
 import subprocess
 import os
 import time
@@ -38,6 +35,8 @@ REMOTE_CONTROLLER = json.loads(config.get("default","remote_controller")) # shou
 BLOCKSTORAGE = json.loads(config.get("default","blockstorage"))
 DEFAULT_PRIMARY = "controller1"
 GET_DRBD_ROLE_CMD = "drbdadm role r0".split()
+GET_MYSQL_STATUS_CMD = "service mysql status".split()
+MYSQL_START_CMD = "service mysql restart".split()
 PING_CMD = "timeout 0.2 ping -c 1 %s" 
 ROLE_PRIMARY = ("Primary/Secondary","Primary/Unknown")
 ROLE_BACKUP = ("Secondary/Primary","Secondary/Unknown")
@@ -102,6 +101,25 @@ def ping(ip_list):
 		return True
 	except Exception as e:
 		return False
+
+def checkMysql():
+	role = getDRBDRole()
+	mysqlStauts = getMysqlStatus()
+	if not mysqlStauts and role == ROLE_PRIMARY:
+		time.sleep(10)
+		logMessage("start mysql service")
+		localExec(MYSQL_START_CMD)
+		if getMysqlStatus():
+			logMessage("start mysql service success.")
+		else:
+			logMessage("start mysql service fail")
+
+def getMysqlStatus():
+	try:
+		res = localExec(GET_MYSQL_STATUS_CMD)
+	except Exception as e:
+		return False
+	return True
 
 def getDRBDRole():
 	res = localExec(GET_DRBD_ROLE_CMD)
@@ -172,6 +190,7 @@ def main():
 			handleFailure()
 			HA_DISABLED = True
 			logMessage("HA_DISABLED %s" % HA_DISABLED)
+		checkMysql()
 		time.sleep(INTERVAL)
 
 if __name__ == '__main__':
