@@ -123,14 +123,21 @@ make_config_file() {
 
 
 upstart_setting() {
+    # upstart file deploy
     UPSTART_CONF_FILE=/home/localadmin/controllerHA/controllerHAd.conf
     RC_LOCAL_FILE=/etc/rc.local
+    RESOURCED_FILE=/home/localadmin/controllerHA/example/HASS
     cp $UPSTART_CONF_FILE /etc/init/.
 
+    # rc local file deploy
     if ! grep -q controllerHAd "$RC_LOCAL_FILE"
     then
 	sed -i "19i service controllerHAd restart" $RC_LOCAL_FILE
     fi
+
+    # resource.d file deploy
+    cp $RESOURCED_FILE /etc/ha.d/resource.d/.
+    chmod 777 /etc/ha.d/resource.d/HASS
     dashboard_setting
 }
 dashboard_setting() {

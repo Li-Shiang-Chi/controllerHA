@@ -18,6 +18,15 @@ import socket
 import ConfigParser
 import json
 import logging
+import asyncore
+import Logger
+import State
+import paramiko
+import Role
+import datetime
+import IPMIModule
+from DetectServiceThread import DetectServiceThread
+from Detector import Detector
 
 
 log_level = logging.getLevelName("INFO")
@@ -31,6 +40,7 @@ logging.basicConfig(filename=log_file_name, level=log_level, format="%(asctime)s
 config = ConfigParser.RawConfigParser()
 config.read("controllerHA.conf")
 
+REMOTE_CONTROLLER_NAME = config.get("default","remote_controller_name")
 REMOTE_CONTROLLER = json.loads(config.get("default","remote_controller")) # should modify here
 BLOCKSTORAGE = json.loads(config.get("default","blockstorage"))
 DEFAULT_PRIMARY = "controller1"
@@ -38,9 +48,6 @@ GET_DRBD_ROLE_CMD = "drbdadm role r0".split()
 GET_MYSQL_STATUS_CMD = "service mysql status".split()
 MYSQL_START_CMD = "service mysql restart".split()
 PING_CMD = "timeout 0.2 ping -c 1 %s" 
-ROLE_PRIMARY = ("Primary/Secondary","Primary/Unknown")
-ROLE_BACKUP = ("Secondary/Primary","Secondary/Unknown")
-ROLE_ALL_BACKUPS = ("Secondary/Secondary",)
 SELF_ISOLATED = False
 REMOTE_CONTROLLER_FAILED = False
 HA_HEALTHY = "HA_HEALTHY"
@@ -51,44 +58,56 @@ HA_DISABLED = False
 TRANSIENT_FAILURE_TIME_OUT = int(config.get("default","transient_timeout"))
 WAIT_PRIMARY_STOP_TIME = int(config.get("default","wait_primary_stop_time"))
 
-def logMessage(message):
-	time_stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-	logging.info("%s" % str(message))
+dst = DetectServiceThread()
+dst.daemon = True
+dst.start()
 
-def handleFailure():
+detector = Detector(REMOTE_CONTROLLER_NAME)
+
+def handleFailure(detect_result):
 	if HA_DISABLED:
 		return
-	if secondChance() == HA_HEALTHY:
-		logMessage("second chance %s" % HA_HEALTHY)
+	if secondChance(detect_result) == HA_HEALTHY:
+		Logger.write("second chance %s" % HA_HEALTHY)
 		return
 	# key: (REMOTE_CONTROLLER_FAILED, SELF_ISOLATED, ROLE)
 	recovery_methods = {
-	(True, False, ROLE_PRIMARY): doNothing,
-	(False, True, ROLE_PRIMARY): stopService,
-	(True, False, ROLE_BACKUP): startService,
-	(False, True, ROLE_BACKUP): doNothing
+	(True, False, Role.PRIMARY): doNothing,
+	(False, True, Role.PRIMARY): stopService,
+	(True, False, Role.BACKUP): startService,
+	(False, True, Role.BACKUP): doNothing
 }
-	role = getDRBDRole()
+	role = Role.get_role()
 	recovery_methods[(REMOTE_CONTROLLER_FAILED, SELF_ISOLATED, role)]()
+
+	host_recovery_methods ={
+	(True, False, Role.PRIMARY): recover_host,
+	(False, True, Role.PRIMARY): doNothing,
+	(True, False, Role.BACKUP): recover_host,
+	(False, True, Role.BACKUP): doNothing
+	}
+
+	host_recovery_methods[(REMOTE_CONTROLLER_FAILED, SELF_ISOLATED, role)](detect_result)
 
 def startService():
 	time.sleep(WAIT_PRIMARY_STOP_TIME)
-	logMessage("start service...")
+	Logger.write("start service...")
 	localExec(START_SERVICE_CMD)
-	role = getDRBDRole()
-	if role == ROLE_PRIMARY:
-		logMessage("start service success, drbd role is %s" % (getDRBDRole(),))
+	role = Role.get_role()
+	if role == Role.PRIMARY:
+		Logger.write("start service success, drbd role is %s" % (Role.get_role(),))
 		return True
-	logMessage("start service fail, drbd role is %s" % (getDRBDRole(),))
+	Logger.write("start service fail, drbd role is %s" % (Role.get_role(),))
 
 def stopService():
 	time.sleep(6)
+	Logger.write("stop service..")
 	localExec(STOP_SERVICE_CMD)
-	role = getDRBDRole()
-	if role == ROLE_BACKUP or ROLE_ALL_BACKUPS:
-		logMessage("stop service success, drbd role is %s" % (getDRBDRole(),))
+	role = Role.get_role()
+	if role == Role.BACKUP or Role.ALL_BACKUPS:
+		Logger.write("stop service success, drbd role is %s" % (Role.get_role(),))
 		return True
-	logMessage("stop service fail, drbd role is %s" % (getDRBDRole(),))
+	Logger.write("stop service fail, drbd role is %s" % (Role.get_role(),))
 
 def doNothing():
 	pass
@@ -103,16 +122,16 @@ def ping(ip_list):
 		return False
 
 def checkMysql():
-	role = getDRBDRole()
+	role = Role.get_role()
 	mysqlStauts = getMysqlStatus()
-	if not mysqlStauts and role == ROLE_PRIMARY:
+	if not mysqlStauts and role == Role.PRIMARY:
 		time.sleep(10)
-		logMessage("start mysql service")
+		Logger.write("start mysql service")
 		localExec(MYSQL_START_CMD)
 		if getMysqlStatus():
-			logMessage("start mysql service success.")
+			Logger.write("start mysql service success.")
 		else:
-			logMessage("start mysql service fail")
+			Logger.write("start mysql service fail")
 
 def getMysqlStatus():
 	try:
@@ -121,21 +140,11 @@ def getMysqlStatus():
 		return False
 	return True
 
-def getDRBDRole():
-	res = localExec(GET_DRBD_ROLE_CMD)
-	if any(role in res for role in ROLE_ALL_BACKUPS):
-		return ROLE_ALL_BACKUPS
-	elif any(role in res for role in ROLE_PRIMARY):
-		return ROLE_PRIMARY
-	elif any(role in res for role in ROLE_BACKUP):
-		return ROLE_BACKUP
-	else:
-		return None
 def getHostName():
 	return socket.gethostname()
 
 def onlyBackup():
-	if getDRBDRole() == ROLE_ALL_BACKUPS:
+	if Role.get_role() == Role.ALL_BACKUPS:
 		return True
 	return False
 
@@ -144,32 +153,159 @@ def startFromOnlyBackup():
 	if HA_DISABLED:
 		return
 	if getHostName() == DEFAULT_PRIMARY:
-		logMessage("start from only backup..")
+		Logger.write("start from only backup..")
 		startService()
-		logMessage("end start from only backup...") 
+		Logger.write("end start from only backup...") 
 
-def secondChance(time_out=TRANSIENT_FAILURE_TIME_OUT):
-	while time_out > 0:
-		detection_result = detect()
-		if detection_result == HA_HEALTHY:
-			return HA_HEALTHY
-		time_out-=1
-		time.sleep(1)
+def secondChance(detect_result, time_out=TRANSIENT_FAILURE_TIME_OUT):
+	if detect_result == State.NETWORK_FAIL:
+		return network_second_chance(time_out)
+	elif detect_result == State.SERVICE_FAIL:
+		return service_second_chance()
+
+def service_second_chance():
+	status = None
+	fail_services = detector.get_fail_services()
+	if fail_services == None: return HA_HEALTHY
+	client = paramiko.SSHClient()
+	client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+	try:
+		client.connect(REMOTE_CONTROLLER_NAME,username='root',timeout=5)
+	except Exception as e:
+		Logger.write("Excpeption : %s" % str(e))
+		return False
+	if "agents" in fail_services: # controllerHAd
+		Logger.write("Start service failure recovery by restarting controllerHAd")
+		cmd = "service ControllerHAd restart"
+		try:
+			client.exec_command(cmd)
+			time.sleep(5)
+
+			cmd = "ps aux | grep '[c]ontrollerHA.py'"
+			stdin, stdout, stderr = client.exec_command(cmd)
+			service = stdout.read()
+			print service
+			if "python controllerHA.py" in service:
+				Logger.write("recover ControllerHAd success")
+				status = HA_HEALTHY
+			else:
+				Logger.write("recover ControllerHAd fail")
+			status = False
+		except Exception as e:
+			Logger.write("recover controllerHAd fail %s" % str(e))
+			status = False
+		finally:
+			if status != HA_HEALTHY:
+				client.exec_command("sudo /home/localadmin/bin/isc21_ha_manual.sh stop", timeout=30)
+			client.close()
+			return status
+	else: # services
+		check_timeout = 5
+		service_mapping = {"libvirt": "libvirt-bin", "nova": "nova-compute", "qemukvm": "qemu-kvm"}
+        fail_service_list = fail_services.split(":")[-1].split(";")[0:-1]
+        try:
+        	for fail_service in fail_service_list:
+        		fail_service = service_mapping[fail_service]
+        		cmd = "sudo service %s restart" % fail_service
+        		client.exec_command(cmd)
+
+        		while check_timeout > 0:
+        			cmd = "service %s status" % fail_service
+        			stdin, stdout, stderr = client.exec_command(cmd)  # check service active or not
+
+        			if not stdout.read():
+        				Logger.write("The controller %s service %s still doesn't work" % (REMOTE_CONTROLLER_NAME, fail_service))
+        			else:
+        				Logger.write("The controller %s service %s successfully restart" % (REMOTE_CONTROLLER_NAME, fail_service))
+        				status = HA_HEALTHY
+        				break
+        			time.sleep(1)
+        			check_timeout -= 1
+        		status = False
+        except Exception as e:
+        	Logger.write(str(e))
+        	status = False
+        finally:
+        	if status != HA_HEALTHY:
+        		client.exec_command("sudo /home/localadmin/bin/isc21_ha_manual.sh stop", timeout=30)
+        	client.close()
+        	return status
+
+def network_second_chance(time_out):
+	Logger.write("start network second_chance...")
+	Logger.write("wait %s seconds and check again" % time_out)
+	time.sleep(time_out)
+	if ping(REMOTE_CONTROLLER):
+		Logger.write("The network status of %s return to health" % REMOTE_CONTROLLER_NAME)
+		return HA_HEALTHY
+	Logger.write("after sleep 30s, %s still network unreachable" % REMOTE_CONTROLLER_NAME)
+	return False
+
+def recover_host(detect_result):
+	if detect_result == State.POWER_FAIL:
+		recover_host_by_start()
+		return
+	recover_host_by_reboot()
+
+def recover_host_by_start(check_timeout=300):
+	Logger.write("recover %s by start" % REMOTE_CONTROLLER_NAME)
+	res = IPMIModule.start_node(REMOTE_CONTROLLER_NAME)
+	prev = datetime.datetime.now()
+	if not res:
+		Logger.write("%s dont have ipmi support, abort host recovery" % REMOTE_CONTROLLER_NAME)
+		return
+	Logger.write("waiting node to start")
+	time.sleep(5)
+	while check_timeout > 0:
+		try:
+			if detector.service() == State.HEALTH:
+				end = datetime.datetime.now()
+				Logger.write("host recovery time %s" % (end - prev))
+				Logger.write("recover controller %s success" % REMOTE_CONTROLLER_NAME)
+				return True
+		except Exception as e:
+			Logger.write(str(e))
+		finally:
+			time.sleep(1)
+			check_timeout -= 1
+	return False
+
+def recover_host_by_reboot(check_timeout=300):
+	Logger.write("recover %s by reboot" % REMOTE_CONTROLLER_NAME)
+	res = IPMIModule.reboot_node(REMOTE_CONTROLLER_NAME)
+	prev = datetime.datetime.now()
+	if not res:
+		Logger.write("%s dont have ipmi support, abort host recovery" % REMOTE_CONTROLLER_NAME)
+		return
+	Logger.write("waiting node to reboot")
+	time.sleep(5)
+	while check_timeout > 0:
+		try:
+			if detector.service() == State.HEALTH:
+				end = datetime.datetime.now()
+				Logger.write("host recovery time %s" % (end - prev)) 
+				Logger.write("recover controller %s success" % REMOTE_CONTROLLER_NAME)
+				return True
+		except Exception as e:
+			Logger.write(str(e))
+		finally:
+			time.sleep(1)
+			check_timeout -= 1
 	return False
 
 def detect():
 	global HA_DISABLED
 	global SELF_ISOLATED
 	global REMOTE_CONTROLLER_FAILED
-	if not ping(REMOTE_CONTROLLER):
+	detect_result = detector.detect_result()
+	if detect_result != State.HEALTH:
 		if not ping(BLOCKSTORAGE):
-			logMessage("self") 
+			Logger.write("self") 
 			SELF_ISOLATED = True
-			return
 		else:
-			logMessage("remote")
+			Logger.write("remote")
 			REMOTE_CONTROLLER_FAILED = True
-			return
+		return detect_result
 	SELF_ISOLATED = False
 	REMOTE_CONTROLLER_FAILED = False
 	HA_DISABLED = False
@@ -184,14 +320,18 @@ def main():
 		if onlyBackup() and not HA_DISABLED:
 			startFromOnlyBackup()
 			continue
-		detection_result = detect()
-		logMessage(detection_result) 
-		if detection_result != HA_HEALTHY:
-			handleFailure()
+		detect_result = detect()
+		Logger.write(detect_result) 
+		if detect_result != HA_HEALTHY:
+			Logger.write("detection time %s" % datetime.datetime.now())
+			handleFailure(detect_result)
 			HA_DISABLED = True
-			logMessage("HA_DISABLED %s" % HA_DISABLED)
-		checkMysql()
+			Logger.write("HA_DISABLED %s" % HA_DISABLED)
+		#checkMysql()
 		time.sleep(INTERVAL)
 
 if __name__ == '__main__':
-	main()
+	try:
+		main()
+	except Exception as e:
+		Logger.write(str(e))

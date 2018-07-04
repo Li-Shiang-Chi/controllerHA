@@ -1,0 +1,18 @@
+#!/bin/bash
+DATE=`date`
+echo "HASS: $DATE $1 Service[HASSd]"
+
+logger $0 called with $1
+case "$1" in
+start)
+    sudo service HASSd start
+    exit 0
+;;
+stop)
+    sudo service HASSd stop
+    exit 0
+;;
+esac
+
+exit 0
+
